@@ -15,7 +15,9 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 
-const PORT = process.env.PORT || 3000;
+// BotHost/хостинги передают порт через PORT (иногда APP_PORT/HTTP_PORT).
+const PORT = process.env.PORT || process.env.APP_PORT || process.env.HTTP_PORT || 3000;
+const HOST = "0.0.0.0"; // слушаем на всех интерфейсах (нужно для домена/контейнера)
 const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TOKEN || process.env.TELEGRAM_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID || 0);
 const ADMIN_PASS = process.env.ADMIN_PASS || "admin"; // пароль веб-админки
@@ -126,6 +128,17 @@ const server = http.createServer(async (req, res) => {
   // CORS preflight
   if (req.method === "OPTIONS") return sendJson(res, 200, {});
 
+  //健康-проверка: открой https://Dvin.bothost.tech/health
+  if (pathname === "/health") {
+    return sendJson(res, 200, {
+      ok: true,
+      port: PORT,
+      publicDir: PUBLIC_DIR,
+      botToken: BOT_TOKEN ? "set" : "missing",
+      time: new Date().toISOString(),
+    });
+  }
+
   /* ----------------------- API ----------------------- */
   if (pathname.startsWith("/api/")) {
     // PUBLIC: получить все данные
@@ -199,8 +212,8 @@ const server = http.createServer(async (req, res) => {
   tryServe(0);
 });
 
-server.listen(PORT, () => {
-  console.log(`🌐 Сайт + API запущены на порту ${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`🌐 Сайт + API запущены на ${HOST}:${PORT}`);
 });
 
 /* ----------------------------- Telegram bot ----------------------------- */
@@ -218,17 +231,40 @@ if (!BOT_TOKEN) {
   }
 }
 
-function startBot() {
-  let TelegramBot;
+function loadTelegram() {
   try {
-    TelegramBot = require("node-telegram-bot-api");
+    return require("node-telegram-bot-api");
   } catch {
+    return null;
+  }
+}
+
+function startBot() {
+  let TelegramBot = loadTelegram();
+
+  // Если модуль не найден — пробуем установить его на лету
+  if (!TelegramBot) {
+    console.log("⏳ Модуль 'node-telegram-bot-api' не найден. Устанавливаю...");
+    try {
+      const { execSync } = require("child_process");
+      execSync("npm install node-telegram-bot-api@^0.66.0 --no-save", {
+        cwd: __dirname,
+        stdio: "inherit",
+      });
+      TelegramBot = loadTelegram();
+    } catch (e) {
+      console.error("❌ Автоустановка не удалась:", e && e.message);
+    }
+  }
+
+  if (!TelegramBot) {
     console.error(
-      "⚠️  Модуль 'node-telegram-bot-api' не установлен — бот пропущен.\n" +
-        "   Выполните `npm install` В ТОЙ ЖЕ ПАПКЕ, где лежит server.js.",
+      "⚠️  'node-telegram-bot-api' недоступен — бот пропущен (сайт работает).\n" +
+        "   Запустите вручную: cd " + __dirname + " && npm install",
     );
     return;
   }
+
   const bot = new TelegramBot(BOT_TOKEN, { polling: true });
   const addState = {};
 
