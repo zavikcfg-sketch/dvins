@@ -1,12 +1,14 @@
 /*
  * ============================================================================
- *  Единый сервер для BotHost: сайт + API + Telegram-бот (на Express)
+ *  Сервер: Telegram-бот + статический сайт + REST API
+ *  для хостинга на bot-hosting.net (Dvin.bothost.tech)
  * ============================================================================
- *  - Раздаёт собранный сайт на домене BotHost
- *  - /api/* — общие данные для бота и сайта
- *  - Telegram-бот с кнопками и фото номеров
- *  Зависимости (express, node-telegram-bot-api) ставятся автоматически,
- *  если отсутствуют.
+ *
+ *  Переменные окружения (задаются в панели BotHost):
+ *    BOT_TOKEN   — токен от @BotFather  (обязательно)
+ *    ADMIN_ID    — ваш Telegram ID      (обязательно, защита бота)
+ *    ADMIN_PASS  — пароль админ-панели сайта (необязательно, по умолч. "admin")
+ *    PORT        — порт HTTP-сервера    (BotHost задаёт автоматически)
  * ============================================================================
  */
 
@@ -14,405 +16,800 @@ const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
 
-/* ----------------------- автоустановка зависимостей ----------------------- */
-function ensure(moduleName, spec) {
+/**
+ * Автоматическая установка модуля, если его нет.
+ * BotHost запускает `npm install` в /app/, а наш server.js — в /app/bot/,
+ * поэтому ставим модули прямо в эту папку.
+ */
+function ensureModule(name) {
   try {
-    return require(moduleName);
-  } catch {
-    console.log(`⏳ Устанавливаю отсутствующий модуль: ${moduleName} ...`);
+    return require(name);
+  } catch (_) {
+    console.log(`⏳ Модуль '${name}' не найден. Устанавливаю в ${__dirname}...`);
     try {
-      execSync(`npm install ${spec || moduleName} --no-save`, {
+      execSync(`npm install ${name} --no-audit --no-fund --silent`, {
         cwd: __dirname,
         stdio: "inherit",
       });
-      return require(moduleName);
-    } catch (e) {
-      console.error(`❌ Не удалось установить ${moduleName}:`, e && e.message);
+      // очищаем кеш и пробуем снова
+      Object.keys(require.cache).forEach((k) => delete require.cache[k]);
+      return require(name);
+    } catch (err) {
+      console.error(`❌ Не удалось установить '${name}': ${err.message}`);
       return null;
     }
   }
 }
 
-const express = ensure("express");
+const express = ensureModule("express");
+const TelegramBot = ensureModule("node-telegram-bot-api");
+
 if (!express) {
-  console.error("Критично: express недоступен. Останов.");
+  console.error("❌ Без 'express' сервер не может работать. Завершаю.");
   process.exit(1);
 }
 
-/* ----------------------------- конфиг ----------------------------- */
-const PORT = process.env.PORT || process.env.APP_PORT || process.env.HTTP_PORT || 3000;
-const HOST = "0.0.0.0";
-const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TOKEN || process.env.TELEGRAM_TOKEN;
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID || 0);
 const ADMIN_PASS = process.env.ADMIN_PASS || "admin";
-const SITE_URL = process.env.SITE_URL || "https://Dvin.bothost.tech";
+const PORT = Number(process.env.PORT || 3000);
 
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_FILE = path.join(__dirname, "data.json");
+const PUBLIC_DIR = path.join(__dirname, "public");
 
-function findPublicDir() {
-  const candidates = [
-    path.join(__dirname, "public"),
-    path.join(__dirname, "..", "dist"),
-    path.join(__dirname, "..", "public"),
-  ];
-  for (const dir of candidates) {
-    if (fs.existsSync(path.join(dir, "index.html"))) return dir;
-  }
-  return candidates[0];
-}
-const PUBLIC_DIR = findPublicDir();
-const IMAGES_FALLBACK = path.join(__dirname, "..", "public"); // на случай отдельной папки images
-console.log("📁 Папка сайта:", PUBLIC_DIR);
+/* =========================================================================
+ *  1. ДАННЫЕ
+ * ========================================================================= */
 
-const FILES = {
-  rooms: path.join(DATA_DIR, "rooms.json"),
-  gallery: path.join(DATA_DIR, "gallery.json"),
-  contacts: path.join(DATA_DIR, "contacts.json"),
+const DEFAULT_DATA = {
+  rooms: [
+    {
+      id: "r1",
+      title: "Двухместный «Стандарт»",
+      description: "Уютный номер для двоих с одной двуспальной или двумя односпальными кроватями.",
+      price: 2200,
+      capacity: 2,
+      beds: "1 двуспальная или 2 односпальные",
+      area: 16,
+      image: "/images/room.jpg",
+      amenities: ["Кондиционер", "Телевизор", "Холодильник", "Wi-Fi", "Душ / санузел"],
+      status: "free",
+    },
+    {
+      id: "r2",
+      title: "Трёхместный «Комфорт»",
+      description: "Просторный номер с тремя кроватями и собственной террасой.",
+      price: 3200,
+      capacity: 3,
+      beds: "3 односпальные кровати",
+      area: 20,
+      image: "/images/guest-house.jpg",
+      amenities: ["Кондиционер", "Телевизор", "Холодильник", "Wi-Fi", "Душ / санузел", "Балкон / терраса"],
+      status: "free",
+    },
+    {
+      id: "r3",
+      title: "Семейный «Люкс»",
+      description: "Двухкомнатный номер для семейного отдыха.",
+      price: 4900,
+      capacity: 4,
+      beds: "1 двуспальная + 2 односпальные",
+      area: 28,
+      image: "/images/pool.jpg",
+      amenities: ["Кондиционер", "Телевизор", "Холодильник", "Wi-Fi", "Душ / санузел", "Балкон / терраса", "Фен", "Электрочайник"],
+      status: "busy",
+    },
+    {
+      id: "r4",
+      title: "Четырёхместный «Семейный»",
+      description: "Большой светлый номер с видом на зелёную территорию.",
+      price: 4200,
+      capacity: 4,
+      beds: "2 двуспальные кровати",
+      area: 24,
+      image: "/images/beach.jpg",
+      amenities: ["Кондиционер", "Телевизор", "Холодильник", "Wi-Fi", "Душ / санузел", "Москитная сетка"],
+      status: "free",
+    },
+  ],
+  gallery: [
+    { id: "g1", src: "/images/guest-house.jpg", alt: "Гостевой дом — фасад и двор" },
+    { id: "g2", src: "/images/pool.jpg", alt: "Бассейн и зона отдыха" },
+    { id: "g3", src: "/images/room.jpg", alt: "Уютный номер" },
+    { id: "g4", src: "/images/beach.jpg", alt: "Пляж Азовского моря" },
+  ],
+  contacts: {
+    phone: "+7 (918) 488-69-68",
+    whatsapp: "79184886968",
+    telegram: "golubickaya_dom",
+    vk: "",
+  },
 };
 
-const DEFAULTS = {
-  rooms: require("./defaults/rooms.json"),
-  gallery: require("./defaults/gallery.json"),
-  contacts: require("./defaults/contacts.json"),
-};
-
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-for (const key of Object.keys(FILES)) {
-  if (!fs.existsSync(FILES[key])) {
-    fs.writeFileSync(FILES[key], JSON.stringify(DEFAULTS[key], null, 2), "utf8");
-  }
-}
-
-/* ----------------------------- data helpers ----------------------------- */
-function read(key) {
+function loadData() {
   try {
-    return JSON.parse(fs.readFileSync(FILES[key], "utf8"));
+    const raw = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    return { ...DEFAULT_DATA, ...raw };
   } catch {
-    return DEFAULTS[key];
+    saveData(DEFAULT_DATA);
+    return DEFAULT_DATA;
   }
 }
-function write(key, data) {
-  fs.writeFileSync(FILES[key], JSON.stringify(data, null, 2), "utf8");
+
+function saveData(data) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
 }
 
-/* ============================== EXPRESS APP ============================== */
+function patch(section, value) {
+  const data = loadData();
+  data[section] = value;
+  saveData(data);
+  return data[section];
+}
+
+/* =========================================================================
+ *  2. HTTP-СЕРВЕР: сайт + API
+ * ========================================================================= */
+
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "20mb" })); // base64-картинки могут быть большими
 
-// CORS
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Pass");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
+// API
+app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
+app.get("/api/rooms", (_req, res) => res.json(loadData().rooms));
+app.put("/api/rooms", (req, res) => {
+  if (!Array.isArray(req.body)) return res.status(400).json({ error: "expected array" });
+  res.json(patch("rooms", req.body));
 });
 
-function authed(req) {
-  return (req.headers["x-admin-pass"] || "") === ADMIN_PASS;
+app.get("/api/gallery", (_req, res) => res.json(loadData().gallery));
+app.put("/api/gallery", (req, res) => {
+  if (!Array.isArray(req.body)) return res.status(400).json({ error: "expected array" });
+  res.json(patch("gallery", req.body));
+});
+
+app.get("/api/contacts", (_req, res) => res.json(loadData().contacts));
+app.put("/api/contacts", (req, res) => {
+  if (!req.body || typeof req.body !== "object")
+    return res.status(400).json({ error: "expected object" });
+  res.json(patch("contacts", req.body));
+});
+
+// Простая проверка пароля админки сайта (опционально)
+app.post("/api/admin/login", (req, res) => {
+  if (req.body && req.body.pass === ADMIN_PASS) res.json({ ok: true });
+  else res.status(401).json({ ok: false });
+});
+
+// Раздача статического сайта.
+// 1) Если есть public/index.html — раздаём его (полная React-сборка).
+// 2) Иначе — отдаём встроенный fallback (красивый HTML, тянет данные через /api/*).
+const indexFile = path.join(PUBLIC_DIR, "index.html");
+const hasSite = fs.existsSync(indexFile);
+
+// Папка с картинками (если есть) — раздаём всегда
+if (fs.existsSync(path.join(PUBLIC_DIR, "images"))) {
+  app.use("/images", express.static(path.join(PUBLIC_DIR, "images")));
 }
 
-/* ----------------------------- API ----------------------------- */
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    port: PORT,
-    publicDir: PUBLIC_DIR,
-    botToken: BOT_TOKEN ? "set" : "missing",
-    time: new Date().toISOString(),
-  });
-});
+// Встроенный fallback-сайт (на случай если public/index.html нет)
+let FALLBACK_HTML = "<h1>Сайт не загружен</h1>";
+try {
+  FALLBACK_HTML = require("./fallback-site.js").SITE_HTML;
+} catch (e) {
+  console.error("Не удалось загрузить fallback-site.js:", e.message);
+}
 
-app.get("/api/state", (_req, res) => {
-  res.json({
-    rooms: read("rooms"),
-    gallery: read("gallery"),
-    contacts: read("contacts"),
-  });
-});
+if (hasSite) {
+  app.use(express.static(PUBLIC_DIR));
+}
 
-app.post("/api/login", (req, res) => {
-  res.json({ ok: (req.body && req.body.pass) === ADMIN_PASS });
-});
-
-app.put("/api/rooms", (req, res) => {
-  if (!authed(req)) return res.status(401).json({ error: "unauthorized" });
-  if (Array.isArray(req.body.rooms)) write("rooms", req.body.rooms);
-  res.json({ ok: true, rooms: read("rooms") });
-});
-
-app.put("/api/gallery", (req, res) => {
-  if (!authed(req)) return res.status(401).json({ error: "unauthorized" });
-  if (Array.isArray(req.body.gallery)) write("gallery", req.body.gallery);
-  res.json({ ok: true, gallery: read("gallery") });
-});
-
-app.put("/api/contacts", (req, res) => {
-  if (!authed(req)) return res.status(401).json({ error: "unauthorized" });
-  if (req.body.contacts) write("contacts", req.body.contacts);
-  res.json({ ok: true, contacts: read("contacts") });
-});
-
-/* ----------------------------- статический сайт ----------------------------- */
-app.use(express.static(PUBLIC_DIR));
-app.use(express.static(IMAGES_FALLBACK)); // запасной источник для /images/*
-
-// SPA-фолбэк: всё остальное → index.html
-app.get("*", (_req, res) => {
-  const indexFile = path.join(PUBLIC_DIR, "index.html");
-  if (fs.existsSync(indexFile)) return res.sendFile(indexFile);
-  res.status(404).send("index.html не найден. Соберите сайт: node bot/prepare-public.js");
-});
-
-app.listen(PORT, HOST, () => {
-  console.log(`🌐 Сайт + API запущены на ${HOST}:${PORT}`);
-  console.log("ℹ️  env.PORT =", process.env.PORT, "| открой", `${SITE_URL}/health`);
-});
-
-/* ============================== TELEGRAM BOT ============================== */
-if (!BOT_TOKEN) {
-  console.warn("⚠️  BOT_TOKEN не задан — бот не запущен (сайт работает).");
-} else {
-  try {
-    startBot();
-  } catch (e) {
-    console.error("⚠️  Бот не запустился:", e && e.message, "(сайт работает)");
+// Универсальный обработчик "всех остальных" путей — через middleware,
+// чтобы работало и в Express 4, и в Express 5 (в 5 поменялся синтаксис wildcards).
+app.use((req, res, next) => {
+  // API и /images — пропускаем дальше (их обработают другие хендлеры или 404)
+  if (req.path.startsWith("/api") || req.path.startsWith("/images")) return next();
+  // Только GET-запросы превращаем в SPA-страницу
+  if (req.method !== "GET") return next();
+  if (hasSite) {
+    return res.sendFile(indexFile);
   }
+  return res.type("html").send(FALLBACK_HTML);
+});
+
+// Слушаем на 0.0.0.0 — иначе хост-домен не сможет до нас достучаться.
+const HOST = "0.0.0.0";
+app.listen(PORT, HOST, () => {
+  console.log("");
+  console.log("===========================================================");
+  console.log(`🌐 HTTP сервер слушает: ${HOST}:${PORT}`);
+  console.log(`📁 Папка сайта:        ${PUBLIC_DIR}`);
+  if (hasSite) {
+    console.log(`   index.html найден ✅ (используется полная React-версия)`);
+  } else {
+    console.log(`   index.html не найден — используется встроенный сайт ✅`);
+  }
+  console.log(`💾 Файл данных:        ${DATA_FILE}`);
+  console.log("===========================================================");
+  if (process.env.SITE_URL) {
+    console.log(`👉 Ваш сайт должен открываться по адресу: ${process.env.SITE_URL}`);
+  }
+  // Диагностика: показываем все потенциально нужные переменные окружения хоста
+  console.log("");
+  console.log("🔍 Диагностика переменных окружения BotHost:");
+  const interesting = Object.keys(process.env).filter((k) =>
+    /port|host|domain|url|public|web|http|app/i.test(k),
+  );
+  if (interesting.length === 0) {
+    console.log("   (никаких port/host/domain переменных нет)");
+  } else {
+    interesting.sort().forEach((k) => {
+      const v = process.env[k];
+      const short = v && v.length > 80 ? v.slice(0, 77) + "..." : v;
+      console.log(`   ${k} = ${short}`);
+    });
+  }
+  console.log("");
+});
+
+/* =========================================================================
+ *  3. TELEGRAM-БОТ
+ * ========================================================================= */
+
+if (!BOT_TOKEN) {
+  console.warn("⚠️  BOT_TOKEN не задан — Telegram-бот не запущен. Сайт работает.");
+} else if (!TelegramBot) {
+  console.warn("⚠️  Telegram-бот пропущен (нет node-telegram-bot-api).");
+} else {
+  startBot();
 }
 
 function startBot() {
-  const TelegramBot = ensure("node-telegram-bot-api", "node-telegram-bot-api@^0.66.0");
-  if (!TelegramBot) {
-    console.error("⚠️  node-telegram-bot-api недоступен — бот пропущен.");
-    return;
+  if (!ADMIN_ID) {
+    console.warn("⚠️  ADMIN_ID не задан — бот доступен всем (НЕБЕЗОПАСНО).");
   }
 
   const bot = new TelegramBot(BOT_TOKEN, { polling: true });
   const addState = {};
+  const SITE_URL = process.env.SITE_URL || "https://Dvin.bothost.tech";
 
-  bot.on("polling_error", (e) => console.error("polling_error:", e.message));
+  function isAdmin(msg) {
+    if (!ADMIN_ID) return true;
+    const id = msg.from?.id || msg.chat?.id;
+    return id === ADMIN_ID;
+  }
 
-  const isAdmin = (msg) => !ADMIN_ID || (msg.from && msg.from.id === ADMIN_ID);
-  const isAdminId = (id) => !ADMIN_ID || id === ADMIN_ID;
+  /* ---------- helpers для картинок ---------- */
+  // Минимальный PNG-плейсхолдер (1×1 жёлтый пиксель) для случая когда фото нет
+  const PLACEHOLDER_URL = "https://placehold.co/800x600/fbbf24/ffffff/png?text=%F0%9F%8F%A1+Гостевой+дом";
 
-  function imagePath(image) {
-    if (!image) return null;
-    if (image.startsWith("http")) return image;
-    if (image.startsWith("data:")) return null;
-    const rel = image.replace(/^\//, "");
-    const candidates = [
-      path.join(PUBLIC_DIR, rel),
-      path.join(__dirname, "public", rel),
-      path.join(__dirname, "..", "public", rel),
-    ];
-    for (const c of candidates) if (fs.existsSync(c)) return c;
+  function resolveImage(src) {
+    if (!src) return null;
+    // data:image/...;base64,xxx
+    if (src.startsWith("data:")) {
+      const m = src.match(/^data:(image\/[\w+]+);base64,(.+)$/);
+      if (!m) return null;
+      return { type: "buffer", buffer: Buffer.from(m[2], "base64"), mime: m[1] };
+    }
+    // абсолютный URL
+    if (/^https?:\/\//i.test(src)) return { type: "url", url: src };
+    // путь вида /images/room.jpg
+    if (src.startsWith("/")) {
+      const full = path.join(PUBLIC_DIR, src);
+      if (fs.existsSync(full)) {
+        return { type: "stream", stream: fs.createReadStream(full) };
+      }
+      // нет файла — даже не пробуем URL (он всё равно недоступен)
+      return null;
+    }
     return null;
   }
 
-  function escapeMd(s) {
-    return String(s).replace(/([_*`\[\]])/g, "\\$1");
+  async function sendPhotoSafe(chatId, src, opts) {
+    const img = resolveImage(src);
+    try {
+      if (img?.type === "buffer") {
+        return await bot.sendPhoto(chatId, img.buffer, opts);
+      }
+      if (img?.type === "stream") {
+        return await bot.sendPhoto(chatId, img.stream, opts);
+      }
+      if (img?.type === "url") {
+        return await bot.sendPhoto(chatId, img.url, opts);
+      }
+      // нет картинки — отдаём красивую заглушку по URL
+      return await bot.sendPhoto(chatId, PLACEHOLDER_URL, opts);
+    } catch (e) {
+      console.error("sendPhoto error:", e.message);
+      // финальный fallback — обычное сообщение
+      return bot.sendMessage(chatId, opts.caption || "(нет фото)", {
+        parse_mode: opts.parse_mode,
+        reply_markup: opts.reply_markup,
+      });
+    }
   }
 
-  const mainMenu = {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "🛏️ Список номеров", callback_data: "list" }],
-        [
-          { text: "➕ Добавить номер", callback_data: "add" },
-          { text: "🔄 Обновить", callback_data: "refresh" },
-        ],
-        [{ text: "🌐 Открыть сайт", url: SITE_URL }],
-      ],
-    },
-  };
-
-  function roomKeyboard(room) {
+  /* ---------- меню ---------- */
+  function mainMenu() {
     return {
-      inline_keyboard: [
-        [
-          room.status === "free"
-            ? { text: "🔴 Сделать занятым", callback_data: `busy:${room.id}` }
-            : { text: "🟢 Сделать свободным", callback_data: `free:${room.id}` },
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📋 Список номеров", callback_data: "list" }],
+          [
+            { text: "➕ Добавить номер", callback_data: "add" },
+            { text: "🖼 Галерея", callback_data: "gallery" },
+          ],
+          [
+            { text: "📞 Контакты", callback_data: "contacts" },
+            { text: "📊 Статистика", callback_data: "stats" },
+          ],
+          [{ text: "🌐 Открыть сайт", url: SITE_URL }],
+          [{ text: "ℹ️ Помощь", callback_data: "help" }],
         ],
-        [
-          { text: "💰 Изменить цену", callback_data: `price:${room.id}` },
-          { text: "🗑 Удалить", callback_data: `delask:${room.id}` },
-        ],
-        [{ text: "⬅️ К списку", callback_data: "list" }],
-      ],
+      },
+      parse_mode: "Markdown",
     };
   }
 
-  function roomCaption(r) {
-    const dot = r.status === "free" ? "🟢 Свободен" : "🔴 Занят";
-    const lines = [
-      `🏠 *${escapeMd(r.title)}*`,
+  function roomKeyboard(room, idx, total) {
+    const navRow = [];
+    if (total > 1) {
+      navRow.push({ text: "⬅️", callback_data: `view:${prevId(room.id)}` });
+      navRow.push({ text: `${idx + 1} / ${total}`, callback_data: "noop" });
+      navRow.push({ text: "➡️", callback_data: `view:${nextId(room.id)}` });
+    }
+    return {
+      reply_markup: {
+        inline_keyboard: [
+          ...(navRow.length ? [navRow] : []),
+          [
+            {
+              text: room.status === "free" ? "🔴 Занять номер" : "🟢 Освободить",
+              callback_data: `toggle:${room.id}`,
+            },
+          ],
+          [
+            { text: "💰 Цена", callback_data: `price:${room.id}` },
+            { text: "✏️ Описание", callback_data: `desc:${room.id}` },
+          ],
+          [
+            { text: "📸 Фото", callback_data: `photo:${room.id}` },
+            { text: "🗑 Удалить", callback_data: `del:${room.id}` },
+          ],
+          [{ text: "« К списку", callback_data: "list" }],
+        ],
+      },
+      parse_mode: "Markdown",
+    };
+  }
+
+  function prevId(id) {
+    const rooms = loadData().rooms;
+    const i = rooms.findIndex((r) => r.id === id);
+    return rooms[(i - 1 + rooms.length) % rooms.length].id;
+  }
+  function nextId(id) {
+    const rooms = loadData().rooms;
+    const i = rooms.findIndex((r) => r.id === id);
+    return rooms[(i + 1) % rooms.length].id;
+  }
+
+  function md(s) {
+    // экранирование для Markdown (легаси)
+    return String(s ?? "").replace(/([_*`\[\]])/g, "\\$1");
+  }
+
+  function formatRoomCaption(r) {
+    const statusBadge = r.status === "free" ? "🟢 *СВОБОДЕН*" : "🔴 *ЗАНЯТ*";
+    const amen =
+      r.amenities && r.amenities.length
+        ? "\n\n✨ " + r.amenities.map((a) => `_${md(a)}_`).join(" · ")
+        : "";
+    return [
+      `🏡 *${md(r.title)}*`,
+      statusBadge,
       "",
-      dot,
-      `💰 *${Number(r.price).toLocaleString("ru-RU")} ₽* / сутки`,
-      `👥 До ${r.capacity} гостей · 📐 ${r.area || "—"} м²`,
-    ];
-    if (r.beds) lines.push(`🛏️ ${escapeMd(r.beds)}`);
-    if (r.description) lines.push("", `_${escapeMd(r.description)}_`);
-    if (r.amenities && r.amenities.length)
-      lines.push("", "✨ " + r.amenities.map(escapeMd).join(" · "));
-    lines.push("", `\`ID: ${r.id}\``);
-    return lines.join("\n");
+      r.description ? `${md(r.description)}` : "_без описания_",
+      "",
+      `💰  *${Number(r.price).toLocaleString("ru-RU")} ₽* / сутки`,
+      `👥  До *${r.capacity}* гостей${r.beds ? ` · 🛏 ${md(r.beds)}` : ""}`,
+      r.area ? `📐  ${r.area} м²` : "",
+      amen,
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
-  async function sendRoomCard(chatId, room) {
-    const img = imagePath(room.image);
-    const opts = { parse_mode: "Markdown", reply_markup: roomKeyboard(room).reply_markup };
-    try {
-      if (img && !img.startsWith("http")) {
-        await bot.sendPhoto(chatId, fs.createReadStream(img), { caption: roomCaption(room), ...opts });
-      } else if (img) {
-        await bot.sendPhoto(chatId, img, { caption: roomCaption(room), ...opts });
-      } else {
-        await bot.sendMessage(chatId, roomCaption(room), opts);
-      }
-    } catch {
-      await bot.sendMessage(chatId, roomCaption(room), opts);
-    }
+  function helpText() {
+    return [
+      "🤖 *Команды бота:*",
+      "",
+      "/start — главное меню",
+      "/list — список номеров",
+      "/add — добавить новый номер",
+      "/gallery — фото галереи",
+      "/contacts — контакты для брони",
+      "/help — эта подсказка",
+      "/cancel — отменить ввод",
+      "",
+      "💡 _Удобнее всего пользоваться кнопками._",
+    ].join("\n");
   }
 
-  async function sendList(chatId) {
-    const rooms = read("rooms");
+  /* ---------- ОТПРАВКА СПИСКА ---------- */
+  async function sendList(chatId, messageId = null) {
+    const rooms = loadData().rooms;
     if (!rooms.length) {
-      return bot.sendMessage(chatId, "📭 Список номеров пуст.\nНажми «Добавить номер».", mainMenu);
+      const opts = mainMenu();
+      const t = "📭 Список номеров пуст.\nНажмите *➕ Добавить номер*.";
+      return messageId
+        ? bot.editMessageText(t, { chat_id: chatId, message_id: messageId, ...opts }).catch(() =>
+            bot.sendMessage(chatId, t, opts),
+          )
+        : bot.sendMessage(chatId, t, opts);
     }
+    const keyboard = rooms.map((r) => [
+      {
+        text: `${r.status === "free" ? "🟢" : "🔴"} ${r.title} · ${Number(r.price).toLocaleString("ru-RU")}₽`,
+        callback_data: `view:${r.id}`,
+      },
+    ]);
+    keyboard.push([{ text: "➕ Добавить номер", callback_data: "add" }]);
+    keyboard.push([{ text: "« Главное меню", callback_data: "menu" }]);
     const free = rooms.filter((r) => r.status === "free").length;
-    await bot.sendMessage(
-      chatId,
-      `🛏️ *Номера* (${rooms.length})\n🟢 Свободно: ${free} · 🔴 Занято: ${rooms.length - free}`,
-      { parse_mode: "Markdown" },
-    );
-    for (const r of rooms) {
-      // eslint-disable-next-line no-await-in-loop
-      await sendRoomCard(chatId, r);
+    const text = [
+      `🏡 *Номера гостевого дома*`,
+      ``,
+      `Всего: *${rooms.length}*  ·  🟢 свободно: *${free}*  ·  🔴 занято: *${rooms.length - free}*`,
+      ``,
+      `_Нажмите на номер для управления._`,
+    ].join("\n");
+    const opts = { parse_mode: "Markdown", reply_markup: { inline_keyboard: keyboard } };
+    if (messageId) {
+      try {
+        return await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...opts });
+      } catch {
+        // если предыдущее сообщение было фото — нельзя editMessageText, удалим и пошлём новое
+        try {
+          await bot.deleteMessage(chatId, messageId);
+        } catch {}
+        return bot.sendMessage(chatId, text, opts);
+      }
     }
-    await bot.sendMessage(chatId, "Что дальше?", mainMenu);
+    return bot.sendMessage(chatId, text, opts);
   }
 
-  function showMenu(chatId) {
-    bot.sendMessage(
-      chatId,
-      "🏡 *Гостевой дом «Голубицкая»*\nПанель управления\n\nВыбери действие 👇",
-      { parse_mode: "Markdown", reply_markup: mainMenu.reply_markup },
-    );
+  /* ---------- ПОКАЗАТЬ ОДИН НОМЕР С ФОТО ---------- */
+  async function sendRoomCard(chatId, room, deleteMessageId = null) {
+    const rooms = loadData().rooms;
+    const idx = rooms.findIndex((r) => r.id === room.id);
+    const opts = {
+      caption: formatRoomCaption(room),
+      parse_mode: "Markdown",
+      reply_markup: roomKeyboard(room, idx, rooms.length).reply_markup,
+    };
+    if (deleteMessageId) {
+      try {
+        await bot.deleteMessage(chatId, deleteMessageId);
+      } catch {}
+    }
+    return sendPhotoSafe(chatId, room.image, opts);
   }
 
+  /* ---------- ГАЛЕРЕЯ ---------- */
+  async function sendGallery(chatId, messageId = null) {
+    const gallery = loadData().gallery || [];
+    if (!gallery.length) {
+      const t = "🖼 Галерея пуста.";
+      return messageId
+        ? bot.editMessageText(t, { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [[{ text: "« Меню", callback_data: "menu" }]] } }).catch(() => bot.sendMessage(chatId, t))
+        : bot.sendMessage(chatId, t);
+    }
+    if (messageId) {
+      try {
+        await bot.deleteMessage(chatId, messageId);
+      } catch {}
+    }
+    // отправляем по одной картинке (надёжнее, чем mediaGroup)
+    const items = gallery.slice(0, 10);
+    await bot.sendMessage(chatId, `🖼 *Галерея гостевого дома* (${gallery.length} фото)`, {
+      parse_mode: "Markdown",
+    });
+    for (const g of items) {
+      await sendPhotoSafe(chatId, g.src, { caption: g.alt || "" });
+    }
+    return bot.sendMessage(chatId, `Всего фото: *${gallery.length}*`, {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: [[{ text: "« Главное меню", callback_data: "menu" }]] },
+    });
+  }
+
+  /* ---------- КОНТАКТЫ ---------- */
+  async function sendContacts(chatId, messageId = null) {
+    const c = loadData().contacts || {};
+    const lines = [
+      "📞 *Контакты для брони*",
+      "",
+      c.phone ? `☎️  ${md(c.phone)}` : null,
+      c.whatsapp ? `💬  WhatsApp: \`+${md(c.whatsapp)}\`` : null,
+      c.telegram ? `✈️  Telegram: @${md(c.telegram)}` : null,
+      c.vk ? `🟦  ВКонтакте: ${md(c.vk)}` : null,
+      "",
+      "_Эти данные показываются гостям при нажатии «Забронировать» на сайте._",
+    ].filter(Boolean);
+    const opts = {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: [[{ text: "« Главное меню", callback_data: "menu" }]] },
+    };
+    if (messageId) {
+      try {
+        return await bot.editMessageText(lines.join("\n"), { chat_id: chatId, message_id: messageId, ...opts });
+      } catch {
+        try { await bot.deleteMessage(chatId, messageId); } catch {}
+      }
+    }
+    return bot.sendMessage(chatId, lines.join("\n"), opts);
+  }
+
+  /* ---------- СТАТИСТИКА ---------- */
+  async function sendStats(chatId, messageId = null) {
+    const data = loadData();
+    const rooms = data.rooms || [];
+    const free = rooms.filter((r) => r.status === "free").length;
+    const busy = rooms.length - free;
+    const totalCap = rooms.reduce((s, r) => s + Number(r.capacity || 0), 0);
+    const avgPrice = rooms.length
+      ? Math.round(rooms.reduce((s, r) => s + Number(r.price || 0), 0) / rooms.length)
+      : 0;
+    const minPrice = rooms.length ? Math.min(...rooms.map((r) => Number(r.price || 0))) : 0;
+    const maxPrice = rooms.length ? Math.max(...rooms.map((r) => Number(r.price || 0))) : 0;
+
+    const text = [
+      "📊 *Статистика гостевого дома*",
+      "",
+      `🏡 Всего номеров: *${rooms.length}*`,
+      `🟢 Свободно: *${free}*`,
+      `🔴 Занято: *${busy}*`,
+      `👥 Общая вместимость: *${totalCap}* гостей`,
+      "",
+      `💰 Минимальная цена: *${minPrice.toLocaleString("ru-RU")} ₽*`,
+      `💰 Максимальная: *${maxPrice.toLocaleString("ru-RU")} ₽*`,
+      `💰 Средняя: *${avgPrice.toLocaleString("ru-RU")} ₽*`,
+      "",
+      `🖼 Фото в галерее: *${(data.gallery || []).length}*`,
+    ].join("\n");
+    const opts = {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: [[{ text: "« Главное меню", callback_data: "menu" }]] },
+    };
+    if (messageId) {
+      try {
+        return await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...opts });
+      } catch {
+        try { await bot.deleteMessage(chatId, messageId); } catch {}
+      }
+    }
+    return bot.sendMessage(chatId, text, opts);
+  }
+
+  /* ---------- КОМАНДЫ ---------- */
   bot.onText(/\/start/, (msg) => {
     if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, "⛔ Доступ запрещён.");
-    showMenu(msg.chat.id);
+    bot.sendMessage(
+      msg.chat.id,
+      "👋 *Добро пожаловать в админ-бот!*\n\n🏡 Здесь вы управляете номерами гостевого дома, видите фото и быстро меняете статусы.\n\nВыберите действие:",
+      mainMenu(),
+    );
   });
-  bot.onText(/\/menu/, (msg) => isAdmin(msg) && showMenu(msg.chat.id));
   bot.onText(/\/list/, (msg) => isAdmin(msg) && sendList(msg.chat.id));
-  bot.onText(/\/add/, (msg) => {
-    if (!isAdmin(msg)) return;
-    addState[msg.chat.id] = { step: "title", draft: {} };
-    bot.sendMessage(msg.chat.id, "📝 Введите *название* номера:", { parse_mode: "Markdown" });
+  bot.onText(/\/add/, (msg) => isAdmin(msg) && startAddFlow(msg.chat.id));
+  bot.onText(/\/gallery/, (msg) => isAdmin(msg) && sendGallery(msg.chat.id));
+  bot.onText(/\/contacts/, (msg) => isAdmin(msg) && sendContacts(msg.chat.id));
+  bot.onText(/\/help/, (msg) =>
+    isAdmin(msg) && bot.sendMessage(msg.chat.id, helpText(), { parse_mode: "Markdown" }),
+  );
+  bot.onText(/\/cancel/, (msg) => {
+    if (addState[msg.chat.id]) {
+      delete addState[msg.chat.id];
+      bot.sendMessage(msg.chat.id, "❌ Отменено.", mainMenu());
+    }
   });
 
+  /* ---------- CALLBACK ---------- */
   bot.on("callback_query", async (q) => {
+    if (!isAdmin(q)) return bot.answerCallbackQuery(q.id, { text: "⛔ Доступ запрещён" });
     const chatId = q.message.chat.id;
-    if (!isAdminId(q.from.id)) return bot.answerCallbackQuery(q.id, { text: "⛔ Доступ запрещён" });
+    const messageId = q.message.message_id;
     const [action, id] = (q.data || "").split(":");
-
     try {
-      if (action === "list" || action === "refresh") {
-        await bot.answerCallbackQuery(q.id, { text: action === "refresh" ? "Обновлено" : "" });
-        return sendList(chatId);
+      await bot.answerCallbackQuery(q.id).catch(() => {});
+
+      if (action === "noop") return;
+      if (action === "menu") {
+        try { await bot.deleteMessage(chatId, messageId); } catch {}
+        return bot.sendMessage(chatId, "🏡 *Главное меню*", mainMenu());
       }
-      if (action === "add") {
-        await bot.answerCallbackQuery(q.id);
-        addState[chatId] = { step: "title", draft: {} };
-        return bot.sendMessage(chatId, "📝 Введите *название* номера:", { parse_mode: "Markdown" });
-      }
-      if (action === "free" || action === "busy") {
-        const rooms = read("rooms");
-        const room = rooms.find((r) => r.id === id);
-        if (!room) return bot.answerCallbackQuery(q.id, { text: "Не найдено" });
-        room.status = action === "free" ? "free" : "busy";
-        write("rooms", rooms);
-        await bot.answerCallbackQuery(q.id, {
-          text: room.status === "free" ? "🟢 Свободен" : "🔴 Занят",
-        });
+      if (action === "list") return sendList(chatId, messageId);
+      if (action === "gallery") return sendGallery(chatId, messageId);
+      if (action === "contacts") return sendContacts(chatId, messageId);
+      if (action === "stats") return sendStats(chatId, messageId);
+      if (action === "help") {
         try {
-          const editOpts = {
+          return await bot.editMessageText(helpText(), {
             chat_id: chatId,
-            message_id: q.message.message_id,
+            message_id: messageId,
             parse_mode: "Markdown",
-            reply_markup: roomKeyboard(room).reply_markup,
-          };
-          if (q.message.photo) await bot.editMessageCaption(roomCaption(room), editOpts);
-          else await bot.editMessageText(roomCaption(room), editOpts);
+            reply_markup: { inline_keyboard: [[{ text: "« Меню", callback_data: "menu" }]] },
+          });
         } catch {
-          /* ignore */
+          return bot.sendMessage(chatId, helpText(), { parse_mode: "Markdown" });
+        }
+      }
+
+      if (action === "view") {
+        const room = loadData().rooms.find((r) => r.id === id);
+        if (!room) return bot.sendMessage(chatId, "Номер не найден.");
+        return sendRoomCard(chatId, room, messageId);
+      }
+      if (action === "toggle") {
+        const data = loadData();
+        const room = data.rooms.find((r) => r.id === id);
+        if (!room) return;
+        room.status = room.status === "free" ? "busy" : "free";
+        saveData(data);
+        await bot.answerCallbackQuery(q.id, { text: room.status === "free" ? "🟢 Свободен" : "🔴 Занят" }).catch(() => {});
+        // редактируем caption фото-сообщения
+        try {
+          const rooms = data.rooms;
+          const idx = rooms.findIndex((r) => r.id === room.id);
+          await bot.editMessageCaption(formatRoomCaption(room), {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: "Markdown",
+            reply_markup: roomKeyboard(room, idx, rooms.length).reply_markup,
+          });
+        } catch {
+          return sendRoomCard(chatId, room, messageId);
         }
         return;
       }
-      if (action === "price") {
-        await bot.answerCallbackQuery(q.id);
-        addState[chatId] = { step: "editprice", id };
-        return bot.sendMessage(chatId, "💰 Введите новую цену (число, ₽):");
-      }
-      if (action === "delask") {
-        await bot.answerCallbackQuery(q.id);
-        return bot.sendMessage(chatId, "Точно удалить этот номер?", {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "✅ Да, удалить", callback_data: `del:${id}` },
-                { text: "❌ Отмена", callback_data: "list" },
-              ],
-            ],
-          },
-        });
-      }
       if (action === "del") {
-        const rooms = read("rooms");
-        write("rooms", rooms.filter((r) => r.id !== id));
-        await bot.answerCallbackQuery(q.id, { text: "🗑 Удалено" });
-        return bot.sendMessage(chatId, "🗑 Номер удалён. Обновлено на сайте.", mainMenu);
+        const data = loadData();
+        const room = data.rooms.find((r) => r.id === id);
+        if (!room) return;
+        data.rooms = data.rooms.filter((r) => r.id !== id);
+        saveData(data);
+        try { await bot.deleteMessage(chatId, messageId); } catch {}
+        await bot.sendMessage(chatId, `🗑 Номер *«${md(room.title)}»* удалён.`, { parse_mode: "Markdown" });
+        return sendList(chatId);
       }
+      if (action === "price") {
+        addState[chatId] = { step: "price_new", roomId: id };
+        return bot.sendMessage(chatId, "💰 Введите *новую цену* (₽):\n\n/cancel — отмена", { parse_mode: "Markdown" });
+      }
+      if (action === "desc") {
+        addState[chatId] = { step: "desc_new", roomId: id };
+        return bot.sendMessage(chatId, "✏️ Введите *новое описание*:\n\n/cancel — отмена", { parse_mode: "Markdown" });
+      }
+      if (action === "photo") {
+        addState[chatId] = { step: "photo_new", roomId: id };
+        return bot.sendMessage(
+          chatId,
+          "📸 *Отправьте фото* (как картинку, не файлом).\n\nИли пришлите URL картинки.\n/cancel — отмена",
+          { parse_mode: "Markdown" },
+        );
+      }
+      if (action === "add") return startAddFlow(chatId);
     } catch (e) {
-      console.error("callback error:", e && e.message);
+      console.error("callback error:", e.message);
     }
   });
 
-  bot.on("message", (msg) => {
-    const st = addState[msg.chat.id];
-    if (!st || (msg.text && msg.text.startsWith("/"))) return;
-    const t = (msg.text || "").trim();
+  /* ---------- ДОБАВЛЕНИЕ НОМЕРА ---------- */
+  function startAddFlow(chatId) {
+    addState[chatId] = { step: "title", draft: { status: "free" } };
+    bot.sendMessage(chatId, "📝 *Создание номера*\n\nВведите *название*:\n\n/cancel — отмена", { parse_mode: "Markdown" });
+  }
 
-    if (st.step === "editprice") {
-      const rooms = read("rooms");
-      const room = rooms.find((r) => r.id === st.id);
-      delete addState[msg.chat.id];
-      if (!room) return bot.sendMessage(msg.chat.id, "Номер не найден.");
-      room.price = Number(t) || room.price;
-      write("rooms", rooms);
-      return bot.sendMessage(msg.chat.id, `✅ Цена «${room.title}» теперь ${room.price} ₽.`, mainMenu);
+  /* ---------- ОБРАБОТКА ВВОДА ТЕКСТА ---------- */
+  bot.on("message", async (msg) => {
+    const st = addState[msg.chat.id];
+    if (!st) return;
+
+    // фото — для action=photo
+    if (st.step === "photo_new" && msg.photo) {
+      try {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        const fileLink = await bot.getFileLink(fileId);
+        const data = loadData();
+        const room = data.rooms.find((r) => r.id === st.roomId);
+        if (room) {
+          room.image = fileLink;
+          saveData(data);
+          await bot.sendMessage(msg.chat.id, `✅ Фото номера *«${md(room.title)}»* обновлено.`, { parse_mode: "Markdown" });
+          delete addState[msg.chat.id];
+          return sendRoomCard(msg.chat.id, room);
+        }
+      } catch (e) {
+        console.error("photo save:", e.message);
+        return bot.sendMessage(msg.chat.id, "Не удалось сохранить фото.");
+      }
     }
+
+    if (!msg.text || msg.text.startsWith("/")) return;
+    const t = msg.text.trim();
+
+    if (st.step === "price_new") {
+      const price = Number(t.replace(/\D/g, ""));
+      if (!price) return bot.sendMessage(msg.chat.id, "Введите число.");
+      const data = loadData();
+      const room = data.rooms.find((r) => r.id === st.roomId);
+      if (room) {
+        room.price = price;
+        saveData(data);
+        await bot.sendMessage(msg.chat.id, `✅ Цена *«${md(room.title)}»* теперь *${price.toLocaleString("ru-RU")} ₽*`, { parse_mode: "Markdown" });
+        delete addState[msg.chat.id];
+        return sendRoomCard(msg.chat.id, room);
+      }
+      delete addState[msg.chat.id];
+      return;
+    }
+
+    if (st.step === "desc_new") {
+      const data = loadData();
+      const room = data.rooms.find((r) => r.id === st.roomId);
+      if (room) {
+        room.description = t;
+        saveData(data);
+        await bot.sendMessage(msg.chat.id, `✅ Описание обновлено.`);
+        delete addState[msg.chat.id];
+        return sendRoomCard(msg.chat.id, room);
+      }
+      delete addState[msg.chat.id];
+      return;
+    }
+
+    if (st.step === "photo_new") {
+      // прислали URL
+      if (/^https?:\/\//i.test(t)) {
+        const data = loadData();
+        const room = data.rooms.find((r) => r.id === st.roomId);
+        if (room) {
+          room.image = t;
+          saveData(data);
+          await bot.sendMessage(msg.chat.id, `✅ Фото обновлено.`);
+          delete addState[msg.chat.id];
+          return sendRoomCard(msg.chat.id, room);
+        }
+      } else {
+        return bot.sendMessage(msg.chat.id, "Отправьте *картинку* или URL.", { parse_mode: "Markdown" });
+      }
+    }
+
+    // === пошаговое добавление ===
     if (st.step === "title") {
       st.draft.title = t;
       st.step = "price";
       return bot.sendMessage(msg.chat.id, "💰 Введите *цену* (₽/сутки):", { parse_mode: "Markdown" });
     }
     if (st.step === "price") {
-      st.draft.price = Number(t) || 0;
+      const price = Number(t.replace(/\D/g, ""));
+      if (!price) return bot.sendMessage(msg.chat.id, "Введите число.");
+      st.draft.price = price;
       st.step = "capacity";
-      return bot.sendMessage(msg.chat.id, "👥 Введите *вместимость* (число гостей):", { parse_mode: "Markdown" });
+      return bot.sendMessage(msg.chat.id, "👥 Введите *вместимость* (гостей):", { parse_mode: "Markdown" });
     }
     if (st.step === "capacity") {
-      st.draft.capacity = Number(t) || 2;
+      const cap = Number(t.replace(/\D/g, ""));
+      if (!cap) return bot.sendMessage(msg.chat.id, "Введите число.");
+      st.draft.capacity = cap;
       st.step = "description";
-      return bot.sendMessage(msg.chat.id, "📄 Введите *описание*:", { parse_mode: "Markdown" });
+      return bot.sendMessage(msg.chat.id, "📝 *Описание* (или `-` чтобы пропустить):", { parse_mode: "Markdown" });
     }
     if (st.step === "description") {
-      st.draft.description = t;
-      const rooms = read("rooms");
+      st.draft.description = t === "-" ? "" : t;
+      const data = loadData();
       const room = {
         id: "r" + Date.now(),
         title: st.draft.title,
@@ -425,22 +822,17 @@ function startBot() {
         amenities: [],
         status: "free",
       };
-      rooms.push(room);
-      write("rooms", rooms);
+      data.rooms.push(room);
+      saveData(data);
       delete addState[msg.chat.id];
-      return bot.sendMessage(msg.chat.id, `✅ Номер «${room.title}» добавлен! Уже виден на сайте.`, mainMenu);
+      await bot.sendMessage(msg.chat.id, `✅ Номер *«${md(room.title)}»* создан!`, { parse_mode: "Markdown" });
+      return sendRoomCard(msg.chat.id, room);
     }
   });
 
-  bot
-    .setMyCommands([
-      { command: "menu", description: "Главное меню" },
-      { command: "list", description: "Список номеров" },
-      { command: "add", description: "Добавить номер" },
-    ])
-    .catch(() => {});
-
-  console.log("🤖 Telegram-бот запущен (кнопки + фото).");
+  console.log("🤖 Telegram-бот запущен.");
+  if (ADMIN_ID) console.log(`👤 Админ ID: ${ADMIN_ID}`);
 }
 
-process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e && e.message));
+process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e));
+process.on("uncaughtException", (e) => console.error("uncaughtException:", e));

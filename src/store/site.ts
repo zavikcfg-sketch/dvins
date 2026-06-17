@@ -1,14 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
-import { apiSaveGallery, apiSaveContacts } from "./api";
-import { subscribe } from "./sync";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { apiGet, apiPut } from "./api";
 
 export type GalleryItem = { id: string; src: string; alt: string };
 
 export type Contacts = {
   phone: string;
-  whatsapp: string; // digits only, e.g. 79184886968
-  telegram: string; // username without @
-  vk: string; // full url or empty
+  whatsapp: string;
+  telegram: string;
+  vk: string;
 };
 
 const GALLERY_KEY = "golubickaya_gallery_v1";
@@ -28,8 +27,8 @@ export const defaultContacts: Contacts = {
   vk: "",
 };
 
-/* ----------------------------- gallery ----------------------------- */
-function loadGallery(): GalleryItem[] {
+/* ---------- gallery ---------- */
+function loadGalleryLocal(): GalleryItem[] {
   try {
     const raw = localStorage.getItem(GALLERY_KEY);
     if (!raw) return defaultGallery;
@@ -41,57 +40,73 @@ function loadGallery(): GalleryItem[] {
   }
 }
 
+function saveGalleryLocal(items: GalleryItem[]) {
+  try {
+    localStorage.setItem(GALLERY_KEY, JSON.stringify(items));
+  } catch {
+    /* ignore */
+  }
+}
+
 const GALLERY_EVENT = "gallery-updated";
 
 export function useGallery() {
   const [gallery, setGallery] = useState<GalleryItem[]>(() =>
-    typeof window === "undefined" ? defaultGallery : loadGallery(),
+    typeof window === "undefined" ? defaultGallery : loadGalleryLocal(),
   );
+  const mounted = useRef(true);
 
   useEffect(() => {
-    const sync = () => setGallery(loadGallery());
-    window.addEventListener(GALLERY_EVENT, sync);
-    window.addEventListener("storage", sync);
-    const unsub = subscribe(sync);
+    mounted.current = true;
+    const sync = async () => {
+      const data = await apiGet<GalleryItem[]>("/gallery", loadGalleryLocal);
+      if (mounted.current) setGallery(data);
+    };
+    sync();
+    const id = window.setInterval(sync, 7000);
+    const onEvt = () => sync();
+    window.addEventListener(GALLERY_EVENT, onEvt);
+    window.addEventListener("storage", onEvt);
     return () => {
-      window.removeEventListener(GALLERY_EVENT, sync);
-      window.removeEventListener("storage", sync);
-      unsub();
+      mounted.current = false;
+      window.clearInterval(id);
+      window.removeEventListener(GALLERY_EVENT, onEvt);
+      window.removeEventListener("storage", onEvt);
     };
   }, []);
 
-  const persist = useCallback((next: GalleryItem[]) => {
-    try {
-      localStorage.setItem(GALLERY_KEY, JSON.stringify(next));
-    } catch {
-      /* ignore */
-    }
+  const persist = useCallback(async (next: GalleryItem[]) => {
+    saveGalleryLocal(next);
     setGallery(next);
+    await apiPut<GalleryItem[]>("/gallery", next, () => next);
     window.dispatchEvent(new Event(GALLERY_EVENT));
-    apiSaveGallery(next);
   }, []);
 
   const addPhoto = useCallback(
-    (src: string, alt: string) => {
-      persist([...loadGallery(), { id: `g${Date.now()}`, src, alt }]);
+    async (src: string, alt: string) => {
+      const list = await apiGet<GalleryItem[]>("/gallery", loadGalleryLocal);
+      await persist([...list, { id: `g${Date.now()}`, src, alt }]);
     },
     [persist],
   );
 
   const deletePhoto = useCallback(
-    (id: string) => {
-      persist(loadGallery().filter((g) => g.id !== id));
+    async (id: string) => {
+      const list = await apiGet<GalleryItem[]>("/gallery", loadGalleryLocal);
+      await persist(list.filter((g) => g.id !== id));
     },
     [persist],
   );
 
-  const resetGallery = useCallback(() => persist(defaultGallery), [persist]);
+  const resetGallery = useCallback(async () => {
+    await persist(defaultGallery);
+  }, [persist]);
 
   return { gallery, addPhoto, deletePhoto, resetGallery };
 }
 
-/* ----------------------------- contacts ----------------------------- */
-function loadContacts(): Contacts {
+/* ---------- contacts ---------- */
+function loadContactsLocal(): Contacts {
   try {
     const raw = localStorage.getItem(CONTACTS_KEY);
     if (!raw) return defaultContacts;
@@ -101,34 +116,46 @@ function loadContacts(): Contacts {
   }
 }
 
+function saveContactsLocal(c: Contacts) {
+  try {
+    localStorage.setItem(CONTACTS_KEY, JSON.stringify(c));
+  } catch {
+    /* ignore */
+  }
+}
+
 const CONTACTS_EVENT = "contacts-updated";
 
 export function useContacts() {
   const [contacts, setContacts] = useState<Contacts>(() =>
-    typeof window === "undefined" ? defaultContacts : loadContacts(),
+    typeof window === "undefined" ? defaultContacts : loadContactsLocal(),
   );
+  const mounted = useRef(true);
 
   useEffect(() => {
-    const sync = () => setContacts(loadContacts());
-    window.addEventListener(CONTACTS_EVENT, sync);
-    window.addEventListener("storage", sync);
-    const unsub = subscribe(sync);
+    mounted.current = true;
+    const sync = async () => {
+      const data = await apiGet<Contacts>("/contacts", loadContactsLocal);
+      if (mounted.current) setContacts(data);
+    };
+    sync();
+    const id = window.setInterval(sync, 15000);
+    const onEvt = () => sync();
+    window.addEventListener(CONTACTS_EVENT, onEvt);
+    window.addEventListener("storage", onEvt);
     return () => {
-      window.removeEventListener(CONTACTS_EVENT, sync);
-      window.removeEventListener("storage", sync);
-      unsub();
+      mounted.current = false;
+      window.clearInterval(id);
+      window.removeEventListener(CONTACTS_EVENT, onEvt);
+      window.removeEventListener("storage", onEvt);
     };
   }, []);
 
-  const saveContacts = useCallback((next: Contacts) => {
-    try {
-      localStorage.setItem(CONTACTS_KEY, JSON.stringify(next));
-    } catch {
-      /* ignore */
-    }
+  const saveContacts = useCallback(async (next: Contacts) => {
+    saveContactsLocal(next);
     setContacts(next);
+    await apiPut<Contacts>("/contacts", next, () => next);
     window.dispatchEvent(new Event(CONTACTS_EVENT));
-    apiSaveContacts(next);
   }, []);
 
   return { contacts, saveContacts };

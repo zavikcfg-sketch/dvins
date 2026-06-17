@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { apiSaveRooms } from "./api";
-import { subscribe } from "./sync";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { apiGet, apiPut } from "./api";
 
 export type RoomStatus = "free" | "busy";
 
@@ -110,7 +109,7 @@ export const defaultRooms: Room[] = [
   },
 ];
 
-function load(): Room[] {
+function loadLocal(): Room[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultRooms;
@@ -123,74 +122,93 @@ function load(): Room[] {
   }
 }
 
-function save(rooms: Room[]) {
+function saveLocal(rooms: Room[]) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(rooms));
   } catch {
-    /* ignore quota errors */
+    /* ignore */
   }
 }
 
-// Simple cross-component sync via a custom event
+async function fetchRooms(): Promise<Room[]> {
+  return apiGet<Room[]>("/rooms", loadLocal);
+}
+
+async function pushRooms(rooms: Room[]): Promise<Room[]> {
+  saveLocal(rooms); // всегда кэшируем локально
+  return apiPut<Room[]>("/rooms", rooms, () => rooms);
+}
+
 const EVENT = "rooms-updated";
 
 export function useRooms() {
   const [rooms, setRooms] = useState<Room[]>(() =>
-    typeof window === "undefined" ? defaultRooms : load(),
+    typeof window === "undefined" ? defaultRooms : loadLocal(),
   );
+  const mounted = useRef(true);
 
+  // первая загрузка + автопросинхронизация каждые 5 секунд
   useEffect(() => {
-    const sync = () => setRooms(load());
-    window.addEventListener(EVENT, sync);
-    window.addEventListener("storage", sync);
-    const unsub = subscribe(sync); // обновления с сервера (бот и т.п.)
+    mounted.current = true;
+    const sync = async () => {
+      const data = await fetchRooms();
+      if (mounted.current) setRooms(data);
+    };
+    sync();
+    const id = window.setInterval(sync, 5000);
+    const onEvt = () => sync();
+    window.addEventListener(EVENT, onEvt);
+    window.addEventListener("storage", onEvt);
     return () => {
-      window.removeEventListener(EVENT, sync);
-      window.removeEventListener("storage", sync);
-      unsub();
+      mounted.current = false;
+      window.clearInterval(id);
+      window.removeEventListener(EVENT, onEvt);
+      window.removeEventListener("storage", onEvt);
     };
   }, []);
 
-  const persist = useCallback((next: Room[]) => {
-    save(next);
+  const persist = useCallback(async (next: Room[]) => {
     setRooms(next);
+    await pushRooms(next);
     window.dispatchEvent(new Event(EVENT));
-    apiSaveRooms(next); // отправляем на сервер (если он есть)
   }, []);
 
   const addRoom = useCallback(
-    (room: Omit<Room, "id">) => {
-      const next = [...load(), { ...room, id: `r${Date.now()}` }];
-      persist(next);
+    async (room: Omit<Room, "id">) => {
+      const next = [...(await fetchRooms()), { ...room, id: `r${Date.now()}` }];
+      await persist(next);
     },
     [persist],
   );
 
   const updateRoom = useCallback(
-    (id: string, patch: Partial<Room>) => {
-      const next = load().map((r) => (r.id === id ? { ...r, ...patch } : r));
-      persist(next);
+    async (id: string, patch: Partial<Room>) => {
+      const list = await fetchRooms();
+      const next = list.map((r) => (r.id === id ? { ...r, ...patch } : r));
+      await persist(next);
     },
     [persist],
   );
 
   const deleteRoom = useCallback(
-    (id: string) => {
-      persist(load().filter((r) => r.id !== id));
+    async (id: string) => {
+      const list = await fetchRooms();
+      await persist(list.filter((r) => r.id !== id));
     },
     [persist],
   );
 
-  const resetRooms = useCallback(() => {
-    persist(defaultRooms);
+  const resetRooms = useCallback(async () => {
+    await persist(defaultRooms);
   }, [persist]);
 
   const toggleStatus = useCallback(
-    (id: string) => {
-      const next = load().map((r) =>
+    async (id: string) => {
+      const list = await fetchRooms();
+      const next = list.map((r) =>
         r.id === id ? { ...r, status: r.status === "free" ? "busy" : "free" } : r,
       ) as Room[];
-      persist(next);
+      await persist(next);
     },
     [persist],
   );
