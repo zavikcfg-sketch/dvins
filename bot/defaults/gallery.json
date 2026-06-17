@@ -1,0 +1,6 @@
+[
+  { "id": "g1", "src": "/images/guest-house.jpg", "alt": "Гостевой дом — фасад и двор" },
+  { "id": "g2", "src": "/images/pool.jpg", "alt": "Бассейн и зона отдыха" },
+  { "id": "g3", "src": "/images/room.jpg", "alt": "Уютный номер" },
+  { "id": "g4", "src": "/images/beach.jpg", "alt": "Пляж Азовского моря" }
+]
