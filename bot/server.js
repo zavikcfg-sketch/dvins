@@ -21,7 +21,24 @@ const ADMIN_ID = Number(process.env.ADMIN_ID || 0);
 const ADMIN_PASS = process.env.ADMIN_PASS || "admin"; // пароль веб-админки
 
 const DATA_DIR = path.join(__dirname, "data");
-const PUBLIC_DIR = path.join(__dirname, "public");
+
+// Ищем папку с собранным сайтом (index.html) в нескольких местах:
+//  1. bot/public        (рекомендуется, см. prepare-public.js)
+//  2. ../dist           (если сайт собран в корне через `npm run build`)
+//  3. ../public         (исходная папка с картинками + если index туда положили)
+function findPublicDir() {
+  const candidates = [
+    path.join(__dirname, "public"),
+    path.join(__dirname, "..", "dist"),
+    path.join(__dirname, "..", "public"),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, "index.html"))) return dir;
+  }
+  return candidates[0]; // по умолчанию bot/public
+}
+const PUBLIC_DIR = findPublicDir();
+console.log("📁 Папка сайта:", PUBLIC_DIR);
 
 const FILES = {
   rooms: path.join(DATA_DIR, "rooms.json"),
@@ -152,30 +169,34 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* ----------------------- статический сайт ----------------------- */
-  let filePath = path.join(PUBLIC_DIR, pathname);
-  if (pathname === "/" || pathname === "") filePath = path.join(PUBLIC_DIR, "index.html");
+  const safePath = path.normalize(pathname).replace(/^(\.\.[/\\])+/, "");
+  const rel = safePath === "/" || safePath === "" || safePath === "\\" ? "index.html" : safePath.replace(/^[/\\]/, "");
 
-  // защита от выхода за пределы папки
-  if (!filePath.startsWith(PUBLIC_DIR)) filePath = path.join(PUBLIC_DIR, "index.html");
+  // Где искать файлы: основная папка сайта + запасная папка с картинками
+  const searchDirs = [PUBLIC_DIR, path.join(__dirname, "..", "public")];
 
-  fs.stat(filePath, (err, stat) => {
-    if (err || !stat.isFile()) {
-      // SPA-фолбэк: всё неизвестное → index.html
-      const indexFile = path.join(PUBLIC_DIR, "index.html");
-      fs.readFile(indexFile, (e, data) => {
-        if (e) {
-          res.writeHead(404);
-          return res.end("Not found");
+  function tryServe(i) {
+    if (i >= searchDirs.length) {
+      // SPA-фолбэк: всё неизвестное → index.html (из любой папки, где он есть)
+      for (const dir of searchDirs) {
+        const indexFile = path.join(dir, "index.html");
+        if (fs.existsSync(indexFile)) {
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          return fs.createReadStream(indexFile).pipe(res);
         }
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(data);
-      });
-      return;
+      }
+      res.writeHead(404);
+      return res.end("Not found");
     }
-    const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
-    fs.createReadStream(filePath).pipe(res);
-  });
+    const filePath = path.join(searchDirs[i], rel);
+    fs.stat(filePath, (err, stat) => {
+      if (err || !stat.isFile()) return tryServe(i + 1);
+      const ext = path.extname(filePath).toLowerCase();
+      res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+      fs.createReadStream(filePath).pipe(res);
+    });
+  }
+  tryServe(0);
 });
 
 server.listen(PORT, () => {
@@ -186,11 +207,28 @@ server.listen(PORT, () => {
 if (!BOT_TOKEN) {
   console.warn("⚠️  BOT_TOKEN не задан — бот не запущен (сайт работает).");
 } else {
-  startBot();
+  try {
+    startBot();
+  } catch (e) {
+    console.error(
+      "⚠️  Не удалось запустить бота:",
+      e && e.message,
+      "\n   Сайт продолжает работать. Проверьте, что выполнен `npm install`.",
+    );
+  }
 }
 
 function startBot() {
-  const TelegramBot = require("node-telegram-bot-api");
+  let TelegramBot;
+  try {
+    TelegramBot = require("node-telegram-bot-api");
+  } catch {
+    console.error(
+      "⚠️  Модуль 'node-telegram-bot-api' не установлен — бот пропущен.\n" +
+        "   Выполните `npm install` В ТОЙ ЖЕ ПАПКЕ, где лежит server.js.",
+    );
+    return;
+  }
   const bot = new TelegramBot(BOT_TOKEN, { polling: true });
   const addState = {};
 
