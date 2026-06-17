@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { apiGet, apiPut } from "./api";
+import { useCallback, useEffect, useState } from "react";
+import { apiSaveGallery, apiSaveContacts } from "./api";
+import { subscribe } from "./sync";
 
 export type GalleryItem = { id: string; src: string; alt: string };
 
 export type Contacts = {
   phone: string;
-  whatsapp: string;
-  telegram: string;
-  vk: string;
+  whatsapp: string; // digits only, e.g. 79184886968
+  telegram: string; // username without @
+  vk: string; // full url or empty
 };
 
 const GALLERY_KEY = "golubickaya_gallery_v1";
@@ -27,8 +28,8 @@ export const defaultContacts: Contacts = {
   vk: "",
 };
 
-/* ---------- gallery ---------- */
-function loadGalleryLocal(): GalleryItem[] {
+/* ----------------------------- gallery ----------------------------- */
+function loadGallery(): GalleryItem[] {
   try {
     const raw = localStorage.getItem(GALLERY_KEY);
     if (!raw) return defaultGallery;
@@ -40,73 +41,57 @@ function loadGalleryLocal(): GalleryItem[] {
   }
 }
 
-function saveGalleryLocal(items: GalleryItem[]) {
-  try {
-    localStorage.setItem(GALLERY_KEY, JSON.stringify(items));
-  } catch {
-    /* ignore */
-  }
-}
-
 const GALLERY_EVENT = "gallery-updated";
 
 export function useGallery() {
   const [gallery, setGallery] = useState<GalleryItem[]>(() =>
-    typeof window === "undefined" ? defaultGallery : loadGalleryLocal(),
+    typeof window === "undefined" ? defaultGallery : loadGallery(),
   );
-  const mounted = useRef(true);
 
   useEffect(() => {
-    mounted.current = true;
-    const sync = async () => {
-      const data = await apiGet<GalleryItem[]>("/gallery", loadGalleryLocal);
-      if (mounted.current) setGallery(data);
-    };
-    sync();
-    const id = window.setInterval(sync, 7000);
-    const onEvt = () => sync();
-    window.addEventListener(GALLERY_EVENT, onEvt);
-    window.addEventListener("storage", onEvt);
+    const sync = () => setGallery(loadGallery());
+    window.addEventListener(GALLERY_EVENT, sync);
+    window.addEventListener("storage", sync);
+    const unsub = subscribe(sync);
     return () => {
-      mounted.current = false;
-      window.clearInterval(id);
-      window.removeEventListener(GALLERY_EVENT, onEvt);
-      window.removeEventListener("storage", onEvt);
+      window.removeEventListener(GALLERY_EVENT, sync);
+      window.removeEventListener("storage", sync);
+      unsub();
     };
   }, []);
 
-  const persist = useCallback(async (next: GalleryItem[]) => {
-    saveGalleryLocal(next);
+  const persist = useCallback((next: GalleryItem[]) => {
+    try {
+      localStorage.setItem(GALLERY_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
     setGallery(next);
-    await apiPut<GalleryItem[]>("/gallery", next, () => next);
     window.dispatchEvent(new Event(GALLERY_EVENT));
+    apiSaveGallery(next);
   }, []);
 
   const addPhoto = useCallback(
-    async (src: string, alt: string) => {
-      const list = await apiGet<GalleryItem[]>("/gallery", loadGalleryLocal);
-      await persist([...list, { id: `g${Date.now()}`, src, alt }]);
+    (src: string, alt: string) => {
+      persist([...loadGallery(), { id: `g${Date.now()}`, src, alt }]);
     },
     [persist],
   );
 
   const deletePhoto = useCallback(
-    async (id: string) => {
-      const list = await apiGet<GalleryItem[]>("/gallery", loadGalleryLocal);
-      await persist(list.filter((g) => g.id !== id));
+    (id: string) => {
+      persist(loadGallery().filter((g) => g.id !== id));
     },
     [persist],
   );
 
-  const resetGallery = useCallback(async () => {
-    await persist(defaultGallery);
-  }, [persist]);
+  const resetGallery = useCallback(() => persist(defaultGallery), [persist]);
 
   return { gallery, addPhoto, deletePhoto, resetGallery };
 }
 
-/* ---------- contacts ---------- */
-function loadContactsLocal(): Contacts {
+/* ----------------------------- contacts ----------------------------- */
+function loadContacts(): Contacts {
   try {
     const raw = localStorage.getItem(CONTACTS_KEY);
     if (!raw) return defaultContacts;
@@ -116,46 +101,34 @@ function loadContactsLocal(): Contacts {
   }
 }
 
-function saveContactsLocal(c: Contacts) {
-  try {
-    localStorage.setItem(CONTACTS_KEY, JSON.stringify(c));
-  } catch {
-    /* ignore */
-  }
-}
-
 const CONTACTS_EVENT = "contacts-updated";
 
 export function useContacts() {
   const [contacts, setContacts] = useState<Contacts>(() =>
-    typeof window === "undefined" ? defaultContacts : loadContactsLocal(),
+    typeof window === "undefined" ? defaultContacts : loadContacts(),
   );
-  const mounted = useRef(true);
 
   useEffect(() => {
-    mounted.current = true;
-    const sync = async () => {
-      const data = await apiGet<Contacts>("/contacts", loadContactsLocal);
-      if (mounted.current) setContacts(data);
-    };
-    sync();
-    const id = window.setInterval(sync, 15000);
-    const onEvt = () => sync();
-    window.addEventListener(CONTACTS_EVENT, onEvt);
-    window.addEventListener("storage", onEvt);
+    const sync = () => setContacts(loadContacts());
+    window.addEventListener(CONTACTS_EVENT, sync);
+    window.addEventListener("storage", sync);
+    const unsub = subscribe(sync);
     return () => {
-      mounted.current = false;
-      window.clearInterval(id);
-      window.removeEventListener(CONTACTS_EVENT, onEvt);
-      window.removeEventListener("storage", onEvt);
+      window.removeEventListener(CONTACTS_EVENT, sync);
+      window.removeEventListener("storage", sync);
+      unsub();
     };
   }, []);
 
-  const saveContacts = useCallback(async (next: Contacts) => {
-    saveContactsLocal(next);
+  const saveContacts = useCallback((next: Contacts) => {
+    try {
+      localStorage.setItem(CONTACTS_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
     setContacts(next);
-    await apiPut<Contacts>("/contacts", next, () => next);
     window.dispatchEvent(new Event(CONTACTS_EVENT));
+    apiSaveContacts(next);
   }, []);
 
   return { contacts, saveContacts };

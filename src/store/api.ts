@@ -1,49 +1,75 @@
-/**
- * Универсальный API-клиент.
- * При первом обращении проверяет, доступен ли бэкенд.
- * Если да — все операции идут через HTTP. Если нет — фоллбэк на localStorage.
- */
+// Клиент для общения с сервером (bot/server.js).
+// Если API недоступно (например, при локальной разработке без сервера),
+// код молча откатывается на localStorage в самих стор-хуках.
 
-let apiAvailable: boolean | null = null;
+export type ApiState = {
+  rooms: unknown[];
+  gallery: unknown[];
+  contacts: unknown;
+};
 
-async function checkApi(): Promise<boolean> {
-  if (apiAvailable !== null) return apiAvailable;
-  try {
-    const res = await fetch("/api/health", { method: "GET" });
-    apiAvailable = res.ok;
-  } catch {
-    apiAvailable = false;
-  }
-  return apiAvailable;
+const PASS_KEY = "admin_pass";
+
+export function getAdminPass(): string {
+  return sessionStorage.getItem(PASS_KEY) || "";
+}
+export function setAdminPass(pass: string) {
+  sessionStorage.setItem(PASS_KEY, pass);
+}
+export function clearAdminPass() {
+  sessionStorage.removeItem(PASS_KEY);
 }
 
-/* ---------- generic helpers ---------- */
-export async function apiGet<T>(path: string, fallback: () => T): Promise<T> {
-  if (!(await checkApi())) return fallback();
+async function jsonOrThrow(res: Response) {
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchState(): Promise<ApiState | null> {
   try {
-    const res = await fetch(`/api${path}`);
-    if (!res.ok) throw new Error("bad response");
-    return (await res.json()) as T;
+    const res = await fetch("/api/state", { cache: "no-store" });
+    return (await jsonOrThrow(res)) as ApiState;
   } catch {
-    return fallback();
+    return null; // нет сервера — работаем на localStorage
   }
 }
 
-export async function apiPut<T>(path: string, body: unknown, fallback: () => T): Promise<T> {
-  if (!(await checkApi())) return fallback();
+export async function apiLogin(pass: string): Promise<boolean> {
   try {
-    const res = await fetch(`/api${path}`, {
-      method: "PUT",
+    const res = await fetch("/api/login", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ pass }),
     });
-    if (!res.ok) throw new Error("bad response");
-    return (await res.json()) as T;
+    const data = await jsonOrThrow(res);
+    return !!data.ok;
   } catch {
-    return fallback();
+    // нет сервера — сравниваем с дефолтным паролем локально
+    return pass === "admin";
   }
 }
 
-export function isApiMode(): boolean {
-  return apiAvailable === true;
+async function put(path: string, payload: unknown): Promise<boolean> {
+  try {
+    const res = await fetch(path, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Pass": getAdminPass(),
+      },
+      body: JSON.stringify(payload),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export const apiSaveRooms = (rooms: unknown[]) => put("/api/rooms", { rooms });
+export const apiSaveGallery = (gallery: unknown[]) => put("/api/gallery", { gallery });
+export const apiSaveContacts = (contacts: unknown) => put("/api/contacts", { contacts });
+
+/** Есть ли вообще сервер (для определения режима). */
+export async function hasServer(): Promise<boolean> {
+  return (await fetchState()) !== null;
 }
