@@ -14,30 +14,39 @@
 
 const fs = require("fs");
 const path = require("path");
+const { execSync } = require("child_process");
 
-// Безопасный импорт зависимостей с понятной ошибкой
-let express, TelegramBot;
-try {
-  express = require("express");
-} catch (e) {
-  console.error("");
-  console.error("❌ Модуль 'express' не установлен.");
-  console.error("   Откройте Console на BotHost и выполните в той папке, где лежит server.js:");
-  console.error("     cd " + __dirname);
-  console.error("     npm install");
-  console.error("");
-  process.exit(1);
+/**
+ * Автоматическая установка модуля, если его нет.
+ * BotHost запускает `npm install` в /app/, а наш server.js — в /app/bot/,
+ * поэтому ставим модули прямо в эту папку.
+ */
+function ensureModule(name) {
+  try {
+    return require(name);
+  } catch (_) {
+    console.log(`⏳ Модуль '${name}' не найден. Устанавливаю в ${__dirname}...`);
+    try {
+      execSync(`npm install ${name} --no-audit --no-fund --silent`, {
+        cwd: __dirname,
+        stdio: "inherit",
+      });
+      // очищаем кеш и пробуем снова
+      Object.keys(require.cache).forEach((k) => delete require.cache[k]);
+      return require(name);
+    } catch (err) {
+      console.error(`❌ Не удалось установить '${name}': ${err.message}`);
+      return null;
+    }
+  }
 }
-try {
-  TelegramBot = require("node-telegram-bot-api");
-} catch (e) {
-  console.warn("");
-  console.warn("⚠️  Модуль 'node-telegram-bot-api' не установлен — Telegram-бот пропущен.");
-  console.warn("   Выполните в Console BotHost:");
-  console.warn("     cd " + __dirname);
-  console.warn("     npm install");
-  console.warn("");
-  TelegramBot = null;
+
+const express = ensureModule("express");
+const TelegramBot = ensureModule("node-telegram-bot-api");
+
+if (!express) {
+  console.error("❌ Без 'express' сервер не может работать. Завершаю.");
+  process.exit(1);
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
