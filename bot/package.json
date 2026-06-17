@@ -1,16 +1,17 @@
 {
-  "name": "golubickaya-site-bot",
+  "name": "golubickaya-server",
   "version": "1.0.0",
-  "description": "Сайт гостевого дома + API + Telegram-бот (единый сервер для BotHost)",
-  "main": "server.js",
-  "type": "commonjs",
+  "description": "Сайт + Telegram-бот для гостевого дома Голубицкая",
+  "main": "http-wrapper.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node http-wrapper.js",
+    "postinstall": "echo 'Зависимости установлены ✓'"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "express": "^4.19.2",
     "node-telegram-bot-api": "^0.66.0"
   }
 }

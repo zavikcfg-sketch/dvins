@@ -2,7 +2,8 @@ import { useRef, useState } from "react";
 import { navigate } from "../router";
 import { ALL_AMENITIES, useRooms, type Room } from "../store/rooms";
 import { useGallery, useContacts, type Contacts } from "../store/site";
-import { apiLogin, setAdminPass, clearAdminPass } from "../store/api";
+
+const ADMIN_PASS = "admin";
 
 type FormState = Omit<Room, "id">;
 type Tab = "rooms" | "gallery" | "contacts";
@@ -50,17 +51,6 @@ export default function Admin() {
     setTimeout(() => setToast(null), 2200);
   };
 
-  const doLogin = async () => {
-    const ok = await apiLogin(pass);
-    if (ok) {
-      setAdminPass(pass); // нужен для авторизованных запросов к API
-      sessionStorage.setItem("admin_ok", "1");
-      setAuthed(true);
-    } else {
-      setPassErr(true);
-    }
-  };
-
   /* ---------- auth gate ---------- */
   if (!authed) {
     return (
@@ -84,7 +74,12 @@ export default function Admin() {
               setPassErr(false);
             }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") doLogin();
+              if (e.key === "Enter") {
+                if (pass === ADMIN_PASS) {
+                  sessionStorage.setItem("admin_ok", "1");
+                  setAuthed(true);
+                } else setPassErr(true);
+              }
             }}
             className={`w-full rounded-xl border px-4 py-3 outline-none transition ${
               passErr ? "border-red-400" : "border-slate-200 focus:border-amber-400"
@@ -94,7 +89,12 @@ export default function Admin() {
             <p className="mt-2 text-sm text-red-500">Неверный пароль (подсказка: admin)</p>
           )}
           <button
-            onClick={doLogin}
+            onClick={() => {
+              if (pass === ADMIN_PASS) {
+                sessionStorage.setItem("admin_ok", "1");
+                setAuthed(true);
+              } else setPassErr(true);
+            }}
             className="mt-4 w-full rounded-xl bg-amber-500 py-3 font-bold text-white transition hover:bg-amber-600"
           >
             Войти
@@ -179,7 +179,6 @@ export default function Admin() {
             <button
               onClick={() => {
                 sessionStorage.removeItem("admin_ok");
-                clearAdminPass();
                 setAuthed(false);
               }}
               className="rounded-full bg-slate-800 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-700"
